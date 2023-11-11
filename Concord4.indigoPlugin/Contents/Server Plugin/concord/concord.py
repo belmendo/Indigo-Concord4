@@ -63,6 +63,12 @@ class SerialInterface(object):
                                             bytesize=CONCORD_BYTESIZE, parity=CONCORD_PARITY,
                                             stopbits=CONCORD_STOPBITS, timeout=timeout_secs,
                                             xonxoff=False, rtscts=False, dsrdtr=False)
+    def read_more(self, byte_read):
+        if byte_read == None:
+            return True
+        if byte_read.decode() == MSG_START:
+            return False
+        return True
 
     def wait_for_message_start(self):
         """ 
@@ -76,16 +82,17 @@ class SerialInterface(object):
         """
 
         byte_read = None
-        while byte_read != MSG_START:
+        while self.read_more(byte_read):
             byte_read = self._read1()
-            if byte_read == '':
+            if byte_read.decode() == '':
                 # Timeout
                 return None
-            self.logger.debug_verbose("Wait for message start, byte_read=%r" % byte_read)
-            if byte_read in CTRL_CHARS:
-                self.control_char_cb(byte_read)
-            # Discard the unrecognized character
+            self.logger.debug(f"Wait for message start, %s byte_read=%r" % (type(byte_read.decode()),byte_read.decode()))
 
+            if byte_read.decode() in CTRL_CHARS:
+                self.control_char_cb(byte_read.decode())
+            # Discard the unrecognized character
+        self.logger.debug("MSG_START %s" % MSG_START)
         return MSG_START
 
     def _read1(self):
@@ -101,12 +108,12 @@ class SerialInterface(object):
         chars_read = []
         while len(chars_read) < n:
             one_char = self._read1()
-            if one_char == '':
+            if one_char.decode() == '':
                 raise TimeoutException("Timeout in the middle of reading message from the panel")
-            if one_char in CTRL_CHARS:
-                ctrl_chars.append(one_char)
+            if one_char.decode() in CTRL_CHARS:
+                ctrl_chars.append(one_char.decode())
             else:
-                chars_read.append(one_char)
+                chars_read.append(one_char.decode())
         return chars_read, ctrl_chars
 
     def read_next_message(self):
@@ -156,6 +163,7 @@ class SerialInterface(object):
         # be sent asynchronously with respect to other messages sent by
         # the panel e.g. an ACK to one of our sent messages
         for cc in ctrl_chars:
+
             self.control_char_cb(cc)
 
         # Decode from ascii hex representation to binary.
@@ -176,7 +184,7 @@ class SerialInterface(object):
         message-start linefeed character.
         """
         framed_msg = MSG_START + encode_message_to_ascii(msg)
-        self.logger.debug_verbose("write_message: %r" % framed_msg.upper())
+        self.logger.debug("write_message: %r" % framed_msg.upper())
         self.serdev.write(framed_msg.upper())
 
     def write(self, data):
@@ -255,7 +263,7 @@ class AlarmPanelInterface(object):
 
         self.message_handlers = {}  # Command ID -> list of message handlers for that ID.
         for command_code, (command_id, command_name, parser_fn) \
-                in RX_COMMANDS.iteritems():
+                in RX_COMMANDS.items():
             self.message_handlers[command_id] = []
 
     def register_message_handler(self, command_id, handler_fn):
@@ -271,21 +279,26 @@ class AlarmPanelInterface(object):
         self.message_handlers[command_id].append(handler_fn)
 
     def ctrl_char_cb(self, cc):
-        self.logger.debug_verbose("Ctrl char %r" % cc)
-        if cc == ACK:
+        real_cc = None
+        if getattr(cc, 'decode', False):
+            real_cc = cc.decode()
+        else:
+            real_cc = cc
+        self.logger.debug("Ctrl char %r" % real_cc)
+        if real_cc == ACK:
             if self.tx_pending is None:
                 self.logger.debug("Spurious ACK")
             else:
-                self.logger.debug_verbose("Expected ACK")
+                self.logger.debug("Expected ACK")
             self.reset_pending_tx()
-        elif cc == NAK:
+        elif real_cc == NAK:
             if self.tx_pending is None:
                 self.logger.debug("Spurious NAK")
             else:
                 self.logger.debug("Possible NAK")
                 self.maybe_resend_message("NAK")
         else:
-            self.logger.info("Unknown control char 0x%02x" % cc)
+            self.logger.info("Unknown control char 0x%02x" % real_cc)
 
     def tx_timeout_exceded(self):
         assert self.tx_pending is not None
@@ -330,6 +343,7 @@ class AlarmPanelInterface(object):
         enqueued here will be consumed and transmitted by the
         background event-loop thread.
         """
+        self.logger.debug("Mesage to be sent %s"  % msg)
         msg.append(compute_checksum(msg))
         self.tx_queue.put(msg)
 
@@ -352,6 +366,7 @@ class AlarmPanelInterface(object):
         loop_last_print_at = datetime.now()
 
         while True:
+            self.logger.debug("In Message loop")
             # Two parts to loop body: 1) look for and handle any
             # incoming messages, and 2) send out any outgoing
             # messages.
@@ -413,6 +428,7 @@ class AlarmPanelInterface(object):
             # pending message timed-out), send what's on the transmit
             # queue.
             #
+            self.logger.debug(f"Going to check %s %s" %  (self.tx_pending is not None, self.tx_pending.__dir__()))
             if self.tx_pending is not None and self.tx_timeout_exceded():
                 no_outputs = False
                 self.maybe_resend_message("timeout")
@@ -426,6 +442,7 @@ class AlarmPanelInterface(object):
                     # a new AlarmPanelInterface instance.
                     self.serial_interface.close()
                     return
+                self.logger.debug(("Goijng to send %s" % msg))
                 self.send_message(msg)
 
             # If there was nothing to do on this pass through the
@@ -435,29 +452,29 @@ class AlarmPanelInterface(object):
 
             secs_since_print = total_secs(datetime.now() - loop_last_print_at)
             if secs_since_print > 20:
-                self.logger.debug_verbose(f"Looping {total_secs(datetime.now() - loop_start_at):d}")
+                self.logger.debug(f"Looping {total_secs(datetime.now() - loop_start_at):d}")
                 loop_last_print_at = datetime.now()
 
     # cut down version of message_loop that only checks the messages each way once then returns
 
     def message_check(self):
-
+        self.logger.debug("In Message Check?")
         # 
         # Handle any synthetic messages and loop them back to us.
         #
-        if not self.fake_rx_queue.empty():
-            no_inputs = False
-            msg = self.fake_rx_queue.get()
-            self.logger.debug("Received synthetic message")
-            # Don't need to confirm checksum as we computed it
-            # ourselves!
-            self.handle_message(msg)
+        # if not self.fake_rx_queue.empty():
+        #     no_inputs = False
+        #     msg = self.fake_rx_queue.get()
+        #     self.logger.debug("Received synthetic message")
+        #     # Don't need to confirm checksum as we computed it
+        #     # ourselves!
+        #     self.handle_message(msg)
 
         # 
         # Handle incoming messages.
-        #
-        if self.serial_interface.wait_for_message_start() == MSG_START:
 
+        if self.serial_interface.wait_for_message_start() == MSG_START:
+            self.logger.debug("Waiting for message start?")
             msg_ok = True
             try:
                 msg = self.serial_interface.read_next_message()
@@ -487,8 +504,10 @@ class AlarmPanelInterface(object):
             self.maybe_resend_message("timeout")
 
         if self.tx_pending is None and not self.tx_queue.empty():
+            # self.logger.debug("I'm gonna send %s" % self.tx_queue.get())
+            self.logger.debug("Sending message")
             self.send_message(self.tx_queue.get())
-
+        self.logger.debug("End of Loop")
     def handle_message(self, msg):
         # Assume we have a good message here.  Command code will
         # either be one or two bytes at offset 1.
@@ -511,22 +530,22 @@ class AlarmPanelInterface(object):
 
         command_id, command_name, command_parser = RX_COMMANDS[command]
         if command_parser is None:
-            self.logger.debug_verbose("No parser for command %s %s" % (command_name, command_id))
+            self.logger.debug("No parser for command %s %s" % (command_name, command_id))
             return
 
-        self.logger.debug_verbose(f"Handling command {cmd_str} {command_id}, {command_parser.__name__}")
+        self.logger.debug(f"Handling command {cmd_str} {command_id}, {command_parser.__name__}")
 
         try:
             decoded_command = command_parser(msg)
             decoded_command['command_id'] = command_id
-            self.logger.debug_verbose(repr(decoded_command))
+            self.logger.debug(repr(decoded_command))
             if len(self.message_handlers[command_id]) == 0:
-                self.logger.debug_verbose("No handlers for command %s" % command_id)
+                self.logger.debug("No handlers for command %s" % command_id)
             for handler in self.message_handlers[command_id]:
-                self.logger.debug_verbose("Calling handler %r" % handler)
+                self.logger.debug("Calling handler %r" % handler)
                 handler(decoded_command)
 
-            self.logger.debug_verbose("Finished handling command %s" % command_id)
+            self.logger.debug("Finished handling command %s" % command_id)
         except Exception as ex:
             self.logger.error(f"Problem handling command {ex!r}\n{encode_message_to_ascii(msg)!r}")
             self.logger.error(traceback.format_exc())

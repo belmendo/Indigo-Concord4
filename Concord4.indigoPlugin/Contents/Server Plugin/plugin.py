@@ -39,10 +39,18 @@ def isZoneErrState(state_list):
             return True
     return False
 
+def remove(zone_list, value):
+    try:
+         zone_list.remove(value)
+    except ValueError:
+        pass
 def zoneStateChangedExceptTripped(old, new):
-    old = list(sorted(old)).pop(TRIPPED)
-    new = list(sorted(new)).pop(TRIPPED)
-    return old != new
+
+    sorted_old = list(sorted(old))
+    sorted_new = list(sorted(new))
+    remove(sorted_old,TRIPPED)
+    remove(sorted_new, TRIPPED)
+    return sorted_old != sorted_new
 
 
 #
@@ -108,7 +116,7 @@ class Plugin(indigo.PluginBase):
         indigo.PluginBase.__init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
         pfmt = logging.Formatter('%(asctime)s.%(msecs)03d\t[%(levelname)8s] %(name)20s.%(funcName)-25s%(msg)s', datefmt='%Y-%m-%d %H:%M:%S')
         self.plugin_file_handler.setFormatter(pfmt)
-        self.logLevel = int(pluginPrefs.get("logLevel", logging.INFO))
+        self.logLevel = int(20) #self.pluginPrefs.get(u"logLevel", logging.INFO))
         self.indigo_log_handler.setLevel(self.logLevel)
         self.logger.debug(f"logLevel = {self.logLevel}")
 
@@ -148,7 +156,8 @@ class Plugin(indigo.PluginBase):
         self.logger.info(f"Serial port is: {self.serialPortUrl}")
 
         self.keepAlive = pluginPrefs.get('keepAlive', False)
-
+        self.errLog = []
+        self.eventLog = []
     def startup(self):
         self.logger.debug("startup called")
 
@@ -170,10 +179,11 @@ class Plugin(indigo.PluginBase):
                 break
 
     def logEvent(self, eventInfo, isErr=False):
+        print(self.__dir__())
         event_time = datetime.now()
-        self._logEvent(eventInfo, event_time, self.eventLog, self.eventLogDays)
+        self._logEvent(eventInfo, event_time,[], 2) # self.eventLog, self.eventLogDays)
         if isErr:
-            self._logEvent(eventInfo, event_time, self.errLog, self.errLogDays)
+            self._logEvent(eventInfo, event_time, [], 2 ) #self.errLog, self.errLogDays)
 
     def logEventZone(self, zoneName, zoneState, prevZoneState, logMessage, cmd, cmdData, isErr=False):
         d = {'zone_name': zoneName,
@@ -204,7 +214,7 @@ class Plugin(indigo.PluginBase):
         triggers we know about in a deterministic order.
 v        """
         t = []
-        for tid, trigger in sorted(self.triggers.iteritems()):
+        for tid, trigger in sorted(self.triggers.items()):
             if trigger.pluginTypeId in triggerTypeIds:
                 t.append(trigger)
         return t
@@ -295,6 +305,7 @@ v        """
         self.logger.debug("Device start comm: %s, %s, %s" % (dev.name, dev.id, dev.deviceTypeId))
 
         if dev.deviceTypeId == "panel":
+
             self.logEvent("Starting panel device %r" % dev.name, True)
             if self.panel is not None and self.panelDev.id != dev.id:
                 dev.updateStateOnServer('panelState', 'unavailable')
@@ -304,6 +315,7 @@ v        """
             dev.updateStateOnServer('panelState', 'connecting')
 
             self.panelDev = dev
+
             try:
                 self.panel = concord.AlarmPanelInterface(self.serialPortUrl, 0.5, self.logger)
             except Exception as ex:
@@ -314,7 +326,7 @@ v        """
 
             # Set the plugin object to handle all incoming commands
             # from the panel via the messageHandler() method.
-            for code, cmd_info in concord_commands.RX_COMMANDS.iteritems():
+            for code, cmd_info in concord_commands.RX_COMMANDS.items():
                 cmd_id, cmd_name = cmd_info[0], cmd_info[1]
                 self.panel_command_names[cmd_id] = cmd_name
                 self.panel.register_message_handler(cmd_id, self.panelMessageHandler)
@@ -340,13 +352,18 @@ v        """
 
         elif dev.deviceTypeId == 'partition':
             pk = partkey(dev)
+
             if pk in self.partDevs:
                 self.logger.warn(f"Partition device {dev.name} has a duplicate partition number {pk:d}, ignoring")
                 return
             self.partDevs[pk] = dev
             self.updatePartitionDeviceState(dev, pk)
+            if dev.pluginProps.has_key("ignored_codes"):
+             self.logger.debug(f"Plugin ignored_codes: type %s %s" % (type(dev.pluginProps["ignored_codes"]),dev.pluginProps["ignored_codes"]))
+             self.ignoredCodes[pk] = dev.pluginProps["ignored_codes"].split()
+            else:
+                self.ignoredCodes[pk] = []
 
-            self.ignoredCodes[pk] = dev.pluginProps["ignored_codes"].split()
             self.logger.debug(f"ignored_codes: {str(self.ignoredCodes)}")
 
         elif dev.deviceTypeId == 'touchpad':
@@ -415,6 +432,7 @@ v        """
             raise Exception(f"Unknown device type: {dev.deviceTypeId!r}")
 
     def runConcurrentThread(self):
+        self.logger.debug("Going to star the runConcurrent Thread")
         try:
             # Run the panel interface event loop.  It's possible for
             # this thread to be running before the panel object is
@@ -607,7 +625,7 @@ v        """
         self.logger.debug("Getting list of existing Indigo device names")
         device_names = set([d.name for d in indigo.devices])
 
-        for zk, zone_data in self.zones.iteritems():
+        for zk, zone_data in self.zones.items():
             part_num, zone_num = zk
             zone_name = zone_data.get('zone_text', '')
             if use_title_case:
@@ -666,7 +684,7 @@ v        """
         Print to log our internal zone state information; cross-check
         Indigo devices against this state.
         """
-        for zk, zone_data in sorted(self.zones.iteritems()):
+        for zk, zone_data in sorted(self.zones.items()):
             part_num, zone_num = zk
             zone_name = zone_data.get('zone_text', 'Unknown')
             zone_type = zone_data.get('zone_type', 'Unknown')
@@ -674,16 +692,16 @@ v        """
                 indigo_id = self.zoneDevs[zk].id
             else:
                 indigo_id = None
-            self.logger.log_always(
+            self.logger.info(
                 f"Zone {zone_num:d}, {zone_name}, Indigo device {indigo_id!r}, state={zone_data['zone_state']!r}, partition={part_num:d}, type={zone_type}")
 
-        for zk, dev in self.zoneDevs.iteritems():
+        for zk, dev in self.zoneDevs.items():
             part_num, zone_num = zk
             if zk in self.zones:
                 # We already know about this stone in our official
                 # internal state.
                 continue
-            self.logger.log_always(
+            self.logger.info(
                 f"No zone info for Indigo device {dev.name!r}, id={dev.id:d}, state={dev.states['zoneState']}, zone {zone_num:d}/{part_num:d}")
 
     def menuSendTestAlarm(self, valuesDict, itemId):
@@ -724,31 +742,33 @@ v        """
         clear_error_log = valuesDict.get("clearErrLog", False)
 
         if clear_event_log:
-            self.logger.log_always("Clearing Event log")
-            self.eventLog.clear()
+            self.logger.info("Clearing Event log")
+           # self.eventLog.clear()
         if clear_error_log:
-            self.logger.log_always("Clearing Error log")
-            self.errLog.clear()
+            self.logger.info("Clearing Error log")
+         #   self.errLog.clear()
 
         return True, valuesDict
 
     def menuDumpLog(self, valuesDict, itemId):
-        log_name = valuesDict.get("log", "none")
-        if log_name == 'eventLog':
-            log = self.eventLog
-            name = 'Event log'
-        elif log_name == 'errLog':
-            log = self.errLog
-            name = 'Error log'
-        else:
-            log = None
-            name = None
-
-        self.logger.log_always(f"Displaying {name}")
-
-        if log is not None:
-            for t, entry in log:
-                self.logger.log_always("%s: %r" % (t.isoformat(' '), entry))
+        self.logger.info(f"Vlues {valuesDict.__dir__(())}")
+        # log_name = valuesDict.get("log", "none")
+        # if log_name == 'eventLog':
+        #   #  log = self.eventLog
+        #     name = 'Event log'
+        # elif log_name == 'errLog':
+        #     log = self.errLog
+        #     name = 'Error log'
+        # else:
+        #     log = None
+        #     name = None
+        # log = None
+        # name = None
+        # self.logger.info(f"Displaying {name}")
+        #
+        # if log is not None:
+        #     for t, entry in log:
+        #         self.logger.info("%s: %r" % (t.isoformat(' '), entry))
 
         return True, valuesDict
 
@@ -819,7 +839,7 @@ v        """
     def alarmGeneralTypeFilter(filter="", valuesDict=None, typeId="", targetId=0):
         gen_codes = [(str(gen_code), gen_name)
                      for gen_code, (gen_name, specific_map)
-                     in sorted(concord_alarm_codes.ALARM_CODES.iteritems())]
+                     in sorted(concord_alarm_codes.ALARM_CODES.items())]
         return [('any', 'Any')] + gen_codes
 
     def getPartitionState(self, part_key):
@@ -941,7 +961,7 @@ v        """
         if cmd_id in ('TOUCHPAD', 'SIREN_SYNC'):
             # These message come all the time so only print about them
             # if the user signed up for extra verbose debug logging.
-            log_fn = self.logger.debug_verbose
+            log_fn = self.logger.debug
         else:
             log_fn = self.logger.debug
         log_fn(f"Handling panel message {cmd_id}, {self.panel_command_names.get(cmd_id, 'Unknown')}")
@@ -969,7 +989,7 @@ v        """
             else:
                 zone_name = '%d' % zone_num
 
-            old_zone_state = "Not known"
+            old_zone_state = ["Not known"]
             new_zone_state = msg['zone_state']
 
             if zk in self.zones:
@@ -998,6 +1018,8 @@ v        """
             # this message.  However, if a zone is in an error state,
             # we don't want to log an error every time it is change
             # between tripped/not-tripped.
+            self.logger.debug("Old %s %s " % (type(old_zone_state),old_zone_state.__dir__()))
+            self.logger.debug("New %s %s" % (type(new_zone_state),new_zone_state.__dir__()))
             use_err_log = (isZoneErrState(old_zone_state) or isZoneErrState(new_zone_state)) and \
                           zoneStateChangedExceptTripped(old_zone_state, new_zone_state)     # noqa
 
@@ -1016,6 +1038,8 @@ v        """
         elif cmd_id in ('PART_DATA', 'ARM_LEVEL', 'FEAT_STATE', 'DELAY', 'TOUCHPAD'):
             part_num = msg['partition_number']
             old_part_state = "Unknown"
+            self.logger.info("Learning new partition  %s message" % ( cmd_id))
+
             if part_num in self.parts:
                 old_part_state = self.getPartitionState(part_num)
                 # Log informational message about updating the
@@ -1023,7 +1047,7 @@ v        """
                 # messages this could be quite frequent (every minute)
                 # so log at a higher level.
                 if cmd_id == 'TOUCHPAD':
-                    log_fn = self.logger.debug_verbose
+                    log_fn = self.logger.debug
                 else:
                     log_fn = self.logger.info
                 log_fn("Updating partition %d with %s message" % (part_num, cmd_id))
@@ -1044,7 +1068,7 @@ v        """
                 # to see warnings if they haven't setup the Partition
                 # device in Indigo, so log this at a higher level.
                 if cmd_id == 'TOUCHPAD':
-                    log_fn = self.logger.debug_verbose
+                    log_fn = self.logger.debug
                 else:
                     log_fn = self.logger.warn
                 log_fn("No Indigo partition device for partition %d" % part_num)
@@ -1055,7 +1079,7 @@ v        """
             # other features to mirror the LEDs on an actual touchpad
             # as well.
             if part_num in self.touchpadDevs:
-                for dev_id, dev in self.touchpadDevs[part_num].iteritems():
+                for dev_id, dev in self.touchpadDevs[part_num].items():
                     self.updateTouchpadDeviceState(dev, part_num)
 
             # Write message to internal log
@@ -1124,7 +1148,7 @@ v        """
             self.refreshPanelState("Reacting to %s message" % cmd_id)
 
         else:
-            self.logger.debug_verbose("Plugin: unhandled panel message %s" % cmd_id)
+            self.logger.debug("Plugin: unhandled panel message %s" % cmd_id)
 
         #
         # Second set of cases for trigger handling
